@@ -3,11 +3,65 @@ from dotenv import load_dotenv
 from anthropic import Anthropic
 import re
 import random
+import sqlite3
+import json
+from datetime import datetime
 
 load_dotenv()
 client = Anthropic()
 
 st.set_page_config(page_title="Sales Outreach Assistant", page_icon="✉️", layout="wide")
+
+# ---------- Database ----------
+DB_PATH = "outreach_history.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS generations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT,
+            lead_name TEXT,
+            lead_company TEXT,
+            variants_json TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_generation(lead_name, lead_company, variants):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO generations (created_at, lead_name, lead_company, variants_json) VALUES (?, ?, ?, ?)",
+        (datetime.now().strftime("%Y-%m-%d %H:%M"), lead_name, lead_company, json.dumps(variants))
+    )
+    conn.commit()
+    conn.close()
+
+def load_history(limit=20):
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT id, created_at, lead_name, lead_company, variants_json FROM generations ORDER BY id DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        result.append({
+            "id": r[0],
+            "created_at": r[1],
+            "lead": f"{r[2]} ({r[3]})",
+            "variants": json.loads(r[4])
+        })
+    return result
+
+def delete_all_history():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM generations")
+    conn.commit()
+    conn.close()
+
+init_db()
 
 # ---------- Styling ----------
 st.markdown("""
@@ -26,9 +80,10 @@ html, body, [class*="css"]  {
 .app-header {
     display: flex;
     align-items: center;
-    gap: 12px;
+    justify-content: space-between;
     margin-bottom: 8px;
 }
+.app-header-left { display: flex; align-items: center; gap: 12px; }
 .app-badge {
     width: 38px; height: 38px; border-radius: 9px;
     background: #F2A93B;
@@ -108,23 +163,37 @@ div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
 }
 .route-text {
     font-size: 13.5px; color: #C3CCDE; line-height: 1.65; white-space: pre-wrap;
+    margin-bottom: 10px;
 }
+.route-meta {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px; color: #6B7A99; margin-bottom: 12px;
+}
+.copy-btn {
+    background: #131B2E; color: #F2A93B; border: 1px solid #2A3550;
+    border-radius: 6px; padding: 6px 14px; font-size: 12px;
+    font-family: 'IBM Plex Mono', monospace; cursor: pointer;
+}
+.copy-btn:hover { background: #2A3550; }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- Header ----------
-st.markdown("""
-<div class="app-header">
-    <div class="app-badge">SO</div>
-    <div>
-        <p class="app-title">Sales Outreach Assistant</p>
-        <p class="app-subtitle">DISPATCH CONSOLE</p>
+header_col1, header_col2 = st.columns([4, 1])
+with header_col1:
+    st.markdown("""
+    <div class="app-header-left">
+        <div class="app-badge">SO</div>
+        <div>
+            <p class="app-title">Sales Outreach Assistant</p>
+            <p class="app-subtitle">DISPATCH CONSOLE</p>
+        </div>
     </div>
-</div>
-""", unsafe_allow_html=True)
-
-if "history" not in st.session_state:
-    st.session_state.history = []
+    """, unsafe_allow_html=True)
+with header_col2:
+    if st.button("Clear history"):
+        delete_all_history()
+        st.rerun()
 
 # ---------- Lead intake ----------
 st.markdown('<p class="section-label">Lead manifest</p>', unsafe_allow_html=True)
@@ -154,12 +223,17 @@ def parse_variants(text):
         subj_match = re.search(r"Subject:\s*(.+)", b)
         subject = subj_match.group(1).strip() if subj_match else "No subject"
         body = re.sub(r"Subject:\s*.+", "", b, count=1).strip()
-        parsed.append({"subject": subject, "body": body})
+        word_count = len(body.split())
+        parsed.append({"subject": subject, "body": body, "word_count": word_count})
     return parsed
 
 def render_variants(variants, key_prefix):
     for i, v in enumerate(variants, start=1):
         route_id = f"RTE-{random.randint(1000,9999)}-{chr(64+i)}"
+        full_text = f"Subject: {v['subject']}\n\n{v['body']}"
+        safe_text = json.dumps(full_text)
+        element_id = f"copytarget_{key_prefix}_{i}"
+
         st.markdown(f"""
         <div class="route-card">
             <div class="route-header">
@@ -169,10 +243,15 @@ def render_variants(variants, key_prefix):
             <div class="route-body">
                 <div class="route-subject">{v['subject']}</div>
                 <div class="route-text">{v['body']}</div>
+                <div class="route-meta">{v.get('word_count', len(v['body'].split()))} words</div>
+                <button class="copy-btn" id="{element_id}" onclick="
+                    navigator.clipboard.writeText({safe_text});
+                    this.innerText = 'Copied';
+                    setTimeout(() => {{ this.innerText = 'Copy email'; }}, 1500);
+                ">Copy email</button>
             </div>
         </div>
         """, unsafe_allow_html=True)
-        st.text_area(f"Copy variant {i}", value=f"Subject: {v['subject']}\n\n{v['body']}", height=160, key=f"{key_prefix}_{i}")
 
 if generate:
     if not lead_name or not lead_company:
@@ -215,17 +294,15 @@ Subject: [subject line]
             result_text = response.content[0].text
 
         variants = parse_variants(result_text)
-
-        st.session_state.history.insert(0, {
-            "lead": f"{lead_name} ({lead_company})",
-            "variants": variants
-        })
+        save_generation(lead_name, lead_company, variants)
 
         st.markdown('<p class="section-label">Generated emails</p>', unsafe_allow_html=True)
         render_variants(variants, "current")
 
-if len(st.session_state.history) > 1:
-    st.markdown('<p class="section-label">Previous generations (this session)</p>', unsafe_allow_html=True)
-    for idx, entry in enumerate(st.session_state.history[1:], start=1):
-        with st.expander(entry["lead"]):
-            render_variants(entry["variants"], f"hist{idx}")
+# ---------- Persistent history ----------
+history = load_history(limit=20)
+if history:
+    st.markdown('<p class="section-label">Previous generations</p>', unsafe_allow_html=True)
+    for entry in history:
+        with st.expander(f"{entry['lead']} — {entry['created_at']}"):
+            render_variants(entry["variants"], f"hist{entry['id']}")
