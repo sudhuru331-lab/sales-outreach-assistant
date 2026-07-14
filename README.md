@@ -6,7 +6,7 @@ An AI-powered tool that generates personalized cold outreach emails for sales de
 
 
 
-\*\*\[Try it live →](YOUR\_APP\_URL\_HERE)\*\*
+\*\*\[Try it live →](https://sales-outreach-assistant-ymakjc84ty7tu2xu4juq79.streamlit.app)\*\*
 
 
 
