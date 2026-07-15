@@ -6,9 +6,11 @@ import random
 import sqlite3
 import json
 import html
+import io
+import csv
 from datetime import datetime
-import os
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+load_dotenv()
 client = Anthropic()
 
 st.set_page_config(page_title="Sales Outreach Assistant", page_icon="✉️", layout="wide")
@@ -55,6 +57,7 @@ def load_history(limit=20):
             "variants": json.loads(r[4])
         })
     return result
+
 def delete_all_history():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM generations")
@@ -79,9 +82,33 @@ Do not invent facts. If you can't find reliable information on something, simply
     text_parts = [block.text for block in response.content if block.type == "text"]
     return "\n".join(text_parts).strip()
 
+def variants_to_txt(lead_name, lead_company, variants):
+    lines = [f"Lead: {lead_name} ({lead_company})", ""]
+    for i, v in enumerate(variants, start=1):
+        lines.append(f"--- Variant {i} ---")
+        lines.append(f"Subject: {v['subject']}")
+        lines.append("")
+        lines.append(v['body'])
+        lines.append("")
+    return "\n".join(lines)
+
+def history_to_csv():
+    conn = sqlite3.connect(DB_PATH)
+    rows = conn.execute(
+        "SELECT created_at, lead_name, lead_company, variants_json FROM generations ORDER BY id DESC"
+    ).fetchall()
+    conn.close()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["created_at", "lead_name", "lead_company", "variant_number", "subject", "body"])
+    for created_at, lead_name, lead_company, variants_json in rows:
+        variants = json.loads(variants_json)
+        for i, v in enumerate(variants, start=1):
+            writer.writerow([created_at, lead_name, lead_company, i, v["subject"], v["body"]])
+    return output.getvalue()
+
 init_db()
-
-
 
 # ---------- Styling ----------
 st.markdown("""
@@ -211,6 +238,8 @@ with header_col1:
     </div>
     """, unsafe_allow_html=True)
 with header_col2:
+    csv_data = history_to_csv()
+    st.download_button("Export all (.csv)", data=csv_data, file_name="outreach_history.csv", mime="text/csv")
     if st.button("Clear history"):
         delete_all_history()
         st.rerun()
@@ -226,8 +255,6 @@ with col2:
     lead_title = st.text_input("Lead's Job Title", placeholder="e.g. VP of Operations")
     tone = st.selectbox("Email Tone", ["Friendly & casual", "Professional & direct", "Consultative & insight-led"])
 
-
-num_variants = st.slider("How many variants to generate?", 1, 3, 2)
 with st.expander("Company Research Assistant — auto-fill context from the web"):
     research_col1, research_col2 = st.columns(2)
     with research_col1:
@@ -248,6 +275,9 @@ context_notes = st.text_area(
     placeholder="e.g. They recently raised a Series B, use manual freight tracking, posted about scaling challenges on LinkedIn",
     key="context_notes_value"
 )
+
+num_variants = st.slider("How many variants to generate?", 1, 3, 2)
+
 generate = st.button("Generate Email", type="primary")
 
 def parse_variants(text):
@@ -261,6 +291,7 @@ def parse_variants(text):
         word_count = len(body.split())
         parsed.append({"subject": subject, "body": body, "word_count": word_count})
     return parsed
+
 def render_variants(variants, key_prefix):
     for i, v in enumerate(variants, start=1):
         route_id = f"RTE-{random.randint(1000,9999)}-{chr(64+i)}"
@@ -330,6 +361,10 @@ Subject: [subject line]
 
         st.markdown('<p class="section-label">Generated emails</p>', unsafe_allow_html=True)
         render_variants(variants, "current")
+
+        txt_data = variants_to_txt(lead_name, lead_company, variants)
+        st.download_button("Download these emails (.txt)", data=txt_data,
+                            file_name=f"{lead_name.replace(' ', '_')}_outreach.txt", mime="text/plain")
 
 # ---------- Persistent history ----------
 history = load_history(limit=20)
