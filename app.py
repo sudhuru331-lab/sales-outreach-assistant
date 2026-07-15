@@ -5,9 +5,10 @@ import re
 import random
 import sqlite3
 import json
+import html
 from datetime import datetime
-
-load_dotenv()
+import os
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 client = Anthropic()
 
 st.set_page_config(page_title="Sales Outreach Assistant", page_icon="✉️", layout="wide")
@@ -226,12 +227,13 @@ def parse_variants(text):
         word_count = len(body.split())
         parsed.append({"subject": subject, "body": body, "word_count": word_count})
     return parsed
-
 def render_variants(variants, key_prefix):
     for i, v in enumerate(variants, start=1):
         route_id = f"RTE-{random.randint(1000,9999)}-{chr(64+i)}"
         full_text = f"Subject: {v['subject']}\n\n{v['body']}"
-        safe_text = json.dumps(full_text)
+        safe_text = json.dumps(full_text).replace("&", "&amp;").replace('"', "&quot;")
+        subject_display = html.escape(v['subject'])
+        body_display = html.escape(v['body'])
         element_id = f"copytarget_{key_prefix}_{i}"
 
         st.markdown(f"""
@@ -241,14 +243,10 @@ def render_variants(variants, key_prefix):
                 <span class="route-tag">VARIANT {i}</span>
             </div>
             <div class="route-body">
-                <div class="route-subject">{v['subject']}</div>
-                <div class="route-text">{v['body']}</div>
+                <div class="route-subject">{subject_display}</div>
+                <div class="route-text">{body_display}</div>
                 <div class="route-meta">{v.get('word_count', len(v['body'].split()))} words</div>
-                <button class="copy-btn" id="{element_id}" onclick="
-                    navigator.clipboard.writeText({safe_text});
-                    this.innerText = 'Copied';
-                    setTimeout(() => {{ this.innerText = 'Copy email'; }}, 1500);
-                ">Copy email</button>
+                <button class="copy-btn" id="{element_id}" onclick="navigator.clipboard.writeText({safe_text}); this.innerText='Copied'; setTimeout(() => {{ this.innerText='Copy email'; }}, 1500);">Copy email</button>
             </div>
         </div>
         """, unsafe_allow_html=True)
