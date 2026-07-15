@@ -55,14 +55,33 @@ def load_history(limit=20):
             "variants": json.loads(r[4])
         })
     return result
-
 def delete_all_history():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM generations")
     conn.commit()
     conn.close()
 
+def research_company(company_name, company_url):
+    query_hint = f" Their website or a relevant page is: {company_url}." if company_url else ""
+    prompt = f"""Research the company "{company_name}" using web search.{query_hint}
+
+Write a concise 3-5 sentence summary useful for a sales development rep writing a cold outreach email. Include, if you can find them: what the company does, approximate size/stage, any recent news (funding, expansion, leadership changes), and anything that hints at operational pain points relevant to logistics, freight, or operations tooling.
+
+Do not invent facts. If you can't find reliable information on something, simply omit it rather than guessing. Write only the summary, nothing else before or after it."""
+
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
+        max_tokens=500,
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": prompt}]
+    )
+
+    text_parts = [block.text for block in response.content if block.type == "text"]
+    return "\n".join(text_parts).strip()
+
 init_db()
+
+
 
 # ---------- Styling ----------
 st.markdown("""
@@ -207,13 +226,28 @@ with col2:
     lead_title = st.text_input("Lead's Job Title", placeholder="e.g. VP of Operations")
     tone = st.selectbox("Email Tone", ["Friendly & casual", "Professional & direct", "Consultative & insight-led"])
 
-context_notes = st.text_area(
-    "Anything you know about them or their company",
-    placeholder="e.g. They recently raised a Series B, use manual freight tracking, posted about scaling challenges on LinkedIn"
-)
 
 num_variants = st.slider("How many variants to generate?", 1, 3, 2)
+with st.expander("Company Research Assistant — auto-fill context from the web"):
+    research_col1, research_col2 = st.columns(2)
+    with research_col1:
+        research_company_name = st.text_input("Company name to research", placeholder="e.g. Acme Logistics")
+    with research_col2:
+        research_url = st.text_input("Website or article URL (optional)", placeholder="e.g. acmelogistics.com/about")
+    if st.button("Research this company"):
+        if not research_company_name:
+            st.warning("Enter a company name to research first.")
+        else:
+            with st.spinner("Researching..."):
+                summary = research_company(research_company_name, research_url)
+            st.session_state.context_notes_value = summary
+            st.rerun()
 
+context_notes = st.text_area(
+    "Anything you know about them or their company",
+    placeholder="e.g. They recently raised a Series B, use manual freight tracking, posted about scaling challenges on LinkedIn",
+    key="context_notes_value"
+)
 generate = st.button("Generate Email", type="primary")
 
 def parse_variants(text):
