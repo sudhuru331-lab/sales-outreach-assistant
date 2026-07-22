@@ -1,7 +1,24 @@
 import streamlit as st
 from dotenv import load_dotenv
-from anthropic import Anthropic, APIStatusError
+from anthropic import Anthropic
 import time
+from anthropic import APIStatusError
+
+def call_claude_with_retry(prompt, max_tokens=800, retries=3):
+    for attempt in range(retries):
+        try:
+            return client.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}]
+            )
+        except APIStatusError as e:
+            if e.status_code == 529 and attempt < retries - 1:
+                wait = 2 ** attempt  # 1s, then 2s, then 4s
+                st.warning(f"Anthropic servers are busy, retrying in {wait}s...")
+                time.sleep(wait)
+            else:
+                raise
 import re
 import random
 import sqlite3
@@ -15,26 +32,6 @@ load_dotenv()
 client = Anthropic()
 
 st.set_page_config(page_title="Sales Outreach Assistant", page_icon="✉️", layout="wide")
-
-# ---------- Claude call with retry (handles transient 529 overload errors) ----------
-def call_claude_with_retry(prompt, max_tokens=800, retries=3, tools=None):
-    for attempt in range(retries):
-        try:
-            kwargs = {
-                "model": "claude-sonnet-4-5",
-                "max_tokens": max_tokens,
-                "messages": [{"role": "user", "content": prompt}]
-            }
-            if tools:
-                kwargs["tools"] = tools
-            return client.messages.create(**kwargs)
-        except APIStatusError as e:
-            if e.status_code == 529 and attempt < retries - 1:
-                wait = 2 ** attempt  # 1s, then 2s, then 4s
-                st.warning(f"Anthropic servers are busy, retrying in {wait}s...")
-                time.sleep(wait)
-            else:
-                raise
 
 # ---------- Database ----------
 DB_PATH = "outreach_history.db"
@@ -93,15 +90,15 @@ Write a concise 3-5 sentence summary useful for a sales development rep writing 
 
 Do not invent facts. If you can't find reliable information on something, simply omit it rather than guessing. Write only the summary, nothing else before or after it."""
 
-    response = call_claude_with_retry(
-        prompt,
+    response = client.messages.create(
+        model="claude-sonnet-4-5",
         max_tokens=500,
-        tools=[{"type": "web_search_20250305", "name": "web_search"}]
+        tools=[{"type": "web_search_20250305", "name": "web_search"}],
+        messages=[{"role": "user", "content": prompt}]
     )
 
     text_parts = [block.text for block in response.content if block.type == "text"]
     return "\n".join(text_parts).strip()
-
 def variants_to_txt(lead_name, lead_company, variants):
     lines = [f"Lead: {lead_name} ({lead_company})", ""]
     for i, v in enumerate(variants, start=1):
@@ -297,49 +294,11 @@ context_notes = st.text_area(
 )
 
 num_variants = st.slider("How many variants to generate?", 1, 3, 2)
-
 btn_col1, btn_col2 = st.columns(2)
 with btn_col1:
     generate = st.button("Generate Email", type="primary", use_container_width=True)
 with btn_col2:
     qualify_clicked = st.button("Qualify & Build Follow-Up", use_container_width=True)
-
-# ---------- Parsing / rendering helpers ----------
-def parse_variants(text):
-    blocks = re.split(r"VARIANT\s+\d+", text)
-    blocks = [b.strip() for b in blocks if b.strip()]
-    parsed = []
-    for b in blocks:
-        subj_match = re.search(r"Subject:\s*(.+)", b)
-        subject = subj_match.group(1).strip() if subj_match else "No subject"
-        body = re.sub(r"Subject:\s*.+", "", b, count=1).strip()
-        word_count = len(body.split())
-        parsed.append({"subject": subject, "body": body, "word_count": word_count})
-    return parsed
-
-def render_variants(variants, key_prefix):
-    for i, v in enumerate(variants, start=1):
-        route_id = f"RTE-{random.randint(1000,9999)}-{chr(64+i)}"
-        full_text = f"Subject: {v['subject']}\n\n{v['body']}"
-        safe_text = json.dumps(full_text).replace("&", "&amp;").replace('"', "&quot;")
-        subject_display = html.escape(v['subject'])
-        body_display = html.escape(v['body'])
-        element_id = f"copytarget_{key_prefix}_{i}"
-
-        st.markdown(f"""
-        <div class="route-card">
-            <div class="route-header">
-                <span class="route-id">{route_id}</span>
-                <span class="route-tag">VARIANT {i}</span>
-            </div>
-            <div class="route-body">
-                <div class="route-subject">{subject_display}</div>
-                <div class="route-text">{body_display}</div>
-                <div class="route-meta">{v.get('word_count', len(v['body'].split()))} words</div>
-                <button class="copy-btn" id="{element_id}" onclick="navigator.clipboard.writeText({safe_text}); this.innerText='Copied'; setTimeout(() => {{ this.innerText='Copy email'; }}, 1500);">Copy email</button>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
 
 def qualify_lead(lead_name, lead_title, lead_company, context_notes):
     prompt = f"""You are a sales development rep's assistant. Score this lead's fit and urgency based only on the information given.
@@ -409,8 +368,27 @@ def parse_sequence(text):
         body = re.sub(r"Subject:\s*.+", "", c, count=1).strip()
         emails.append({"subject": f"{day} — {subject}", "body": body, "word_count": len(body.split())})
     return emails
+def render_variants(variants, key_prefix):
+    for i, v in enumerate(variants, start=1):
+        route_id = f"RTE-{random.randint(1000,9999)}-{chr(64+i)}"
+        full_text = f"Subject: {v['subject']}\n\n{v['body']}"
+        safe_text = json.dumps(full_text).replace("&", "&amp;").replace('"', "&quot;")
+        subject_display = html.escape(v['subject'])
+        body_display = html.escape(v['body'])
+        element_id = f"copytarget_{key_prefix}_{i}"
 
-# ---------- Generate Email ----------
+st.markdown(f"""
+        <div class="route-card">
+            <div class="route-header">
+                <span class="route-id">LEAD SCORE</span>
+                <span class="route-tag" style="background:{tier_colors.get(qual['tier'], '#412402')}; color:#0B1220;">{qual['tier'].upper()}</span>
+            </div>
+            <div class="route-body">
+                <div class="route-text">{html.escape(qual['reasoning'])}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
 if generate:
     if not lead_name or not lead_company:
         st.warning("Please fill in at least the lead's name and company.")
@@ -444,20 +422,18 @@ Subject: [subject line]
 
 (continue numbering if more variants)"""
 
-            response = call_claude_with_retry(prompt, max_tokens=800)
+response = client.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=800,
+                messages=[{"role": "user", "content": prompt}]
+            )
             result_text = response.content[0].text
 
         variants = parse_variants(result_text)
         save_generation(lead_name, lead_company, variants)
-
         st.markdown('<p class="section-label">Generated emails</p>', unsafe_allow_html=True)
         render_variants(variants, "current")
 
-        txt_data = variants_to_txt(lead_name, lead_company, variants)
-        st.download_button("Download these emails (.txt)", data=txt_data,
-                            file_name=f"{lead_name.replace(' ', '_')}_outreach.txt", mime="text/plain")
-
-# ---------- Qualify & Build Follow-Up ----------
 if qualify_clicked:
     if not lead_name or not lead_company:
         st.warning("Please fill in at least the lead's name and company.")
@@ -485,7 +461,7 @@ if qualify_clicked:
         st.markdown('<p class="section-label">Follow-up sequence</p>', unsafe_allow_html=True)
         render_variants(emails, "sequence")
 
-# ---------- Persistent history ----------
+            # ---------- Persistent history ----------
 history = load_history(limit=20)
 if history:
     st.markdown('<p class="section-label">Previous generations</p>', unsafe_allow_html=True)
